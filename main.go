@@ -2,26 +2,27 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"sync"
-	"encoding/json"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 type Customer struct {
-	ID string 
-	Name string 
-	Role string
-	Email string 
-	Phone int   
-	Contacted bool  
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	Email     string `json:"email"`
+	Phone     int    `json:"phone"`
+	Contacted bool   `json:"contacted"`
 }
 
-
 var (
-	dbMu sync.RWMutex
+	dbMu      sync.RWMutex
 	customers = make(map[string]Customer)
 )
 
@@ -61,7 +62,6 @@ func toSlice(m map[string]Customer) []Customer {
 	return out
 }
 
-
 func seed() {
 	c1 := Customer{ID: generateCustomerId(), Name: "Jordan Holland", Role: "Software Engineer", Email: "hollandjb@blah.com", Phone: 5551209, Contacted: true}
 	c2 := Customer{ID: generateCustomerId(), Name: "Matthew Santiago", Role: "Support Engineer", Email: "test@example.com", Phone: 8289028, Contacted: false}
@@ -73,8 +73,6 @@ func seed() {
 	customers[c3.ID] = c3
 	dbMu.Unlock()
 }
-
-
 
 func getCustomer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -104,7 +102,6 @@ func getCustomer(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(c)
 }
 
-
 func getCustomers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -120,19 +117,161 @@ func getCustomers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
+func addCustomer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
 
-// to be implemented
- func addCustomer(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unable to read body"})
+		return
+	}
+	defer r.Body.Close()
 
- }
+	// Accept Customer payload without an id
+	var incomingCustomer struct {
+	  Name      string `json:"name"`
+		Role      string `json:"role"`
+		Email     string `json:"email"`
+		Phone     any    `json:"phone"` // tests send a number; allow string or number
+		Contacted bool   `json:"contacted"`
+	}
 
- func updateCustomer(w http.ResponseWriter, r *http.Request) {
+	if err := json.Unmarshal(body, &incomingCustomer); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+		return
+	}
 
- }
+	// Normalize phone to int
+	phoneInt := 0
+	switch v := incomingCustomer.Phone.(type) {
+	case float64:
+		phoneInt = int(v)
+	case string:
+		if p, err := strconv.Atoi(v); err == nil {
+			phoneInt = p
+		}
+	}
 
- func deleteCustomer(w http.ResponseWriter, r *http.Request) {
+	c := Customer{
+		ID:        generateCustomerId(),
+		Name:      incomingCustomer.Name,
+		Role:      incomingCustomer.Role,
+		Email:     incomingCustomer.Email,
+		Phone:     phoneInt,
+		Contacted: incomingCustomer.Contacted,
+	}
 
- }
+	dbMu.Lock()
+	customers[c.ID] = c
+	dbMu.Unlock()
+
+	w.WriteHeader(http.StatusCreated) 
+	json.NewEncoder(w).Encode(c)
+}
+
+func updateCustomer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	id := parseCustomerId(r.URL.Path)
+	if id == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "customer not found"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unable to read request body"})
+		return
+	}
+	defer r.Body.Close()
+
+	// Allow partial updates (don't touch fields that aren't included in PUT)
+	var patch map[string]any
+	if err := json.Unmarshal(body, &patch); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	dbMu.Lock()
+	c, ok := customers[id]
+	if !ok {
+		dbMu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(nil)
+		return
+	}
+
+	if v, ok := patch["name"].(string); ok {
+		c.Name = v
+	}
+	if v, ok := patch["role"].(string); ok {
+		c.Role = v
+	}
+	if v, ok := patch["email"].(string); ok {
+		c.Email = v
+	}
+	if v, ok := patch["phone"]; ok {
+		switch pv := v.(type) {
+		case float64:
+			c.Phone = int(pv)
+		case string:
+			if p, err := strconv.Atoi(pv); err == nil {
+				c.Phone = p
+			}
+		}
+	}
+	if v, ok := patch["contacted"].(bool); ok {
+		c.Contacted = v
+	}
+
+	customers[id] = c
+	dbMu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(c)
+}
+
+func deleteCustomer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	id := parseCustomerId(r.URL.Path)
+	if id == "" {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "customer not found"})
+		return
+	}
+
+	dbMu.Lock()
+	_, ok := customers[id]
+	if !ok {
+		dbMu.Unlock()
+		w.WriteHeader(http.StatusNotFound) 
+		json.NewEncoder(w).Encode(nil)
+		return
+	}
+	delete(customers, id)
+	dbMu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+}
 
 func main() {
 	seed()
@@ -161,7 +300,6 @@ func main() {
 		`)
 	})
 
-	
 	mux.HandleFunc("/customers", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -186,7 +324,6 @@ func main() {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
-
 
 	log.Println("Server started on localhost port 3000")
 	log.Fatal(http.ListenAndServe(":3000", mux))
