@@ -1,11 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
 	"sync"
-	"crypto/rand"
+	"encoding/json"
+	"strings"
 )
 
 type Customer struct {
@@ -22,19 +24,6 @@ var (
 	dbMu sync.RWMutex
 	customers = make(map[string]Customer)
 )
-
-func seed() {
-	c1 := Customer{ID: generateCustomerId(), Name: "Jordan Holland", Role: "Software Engineer", Email: "hollandjb@blah.com", Phone: 5551209, Contacted: true}
-	c2 := Customer{ID: generateCustomerId(), Name: "Matthew Santiago", Role: "Support Engineer", Email: "test@example.com", Phone: 8289028, Contacted: false}
-	c3 := Customer{ID: generateCustomerId(), Name: "Abigail Spanberger", Role: "Governor", Email: "abigail@example.com", Phone: 2329752, Contacted: true}
-
-	dbMu.Lock()
-	customers[c1.ID] = c1
-	customers[c2.ID] = c2
-	customers[c3.ID] = c3
-	dbMu.Unlock()
-}
-
 
 // generateCustomerId returns a 32-hex char id (simple, unique enough for this app).
 func generateCustomerId() string {
@@ -53,14 +42,86 @@ func generateCustomerId() string {
 	return string(out)
 }
 
- func getCustomer(w http.ResponseWriter, r *http.Request) {
+// gets the ID in the /customers/{id} path
+func parseCustomerId(path string) string {
+	trimmed := strings.TrimSuffix(path, "/")
+	const prefix = "/customers/"
+	if strings.HasPrefix(trimmed, prefix) {
+		return trimmed[len(prefix):]
+	}
+	return ""
+}
 
- }
+// converts a map to a slice for JSON response
+func toSlice(m map[string]Customer) []Customer {
+	out := make([]Customer, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
+}
 
- func getCustomers(w http.ResponseWriter, r *http.Request) {
 
- }
+func seed() {
+	c1 := Customer{ID: generateCustomerId(), Name: "Jordan Holland", Role: "Software Engineer", Email: "hollandjb@blah.com", Phone: 5551209, Contacted: true}
+	c2 := Customer{ID: generateCustomerId(), Name: "Matthew Santiago", Role: "Support Engineer", Email: "test@example.com", Phone: 8289028, Contacted: false}
+	c3 := Customer{ID: generateCustomerId(), Name: "Abigail Spanberger", Role: "Governor", Email: "abigail@example.com", Phone: 2329752, Contacted: true}
 
+	dbMu.Lock()
+	customers[c1.ID] = c1
+	customers[c2.ID] = c2
+	customers[c3.ID] = c3
+	dbMu.Unlock()
+}
+
+
+
+func getCustomer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	id := parseCustomerId(r.URL.Path)
+	if id == "" {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Customer not found"})
+		return
+	}
+
+	dbMu.RLock()
+	c, ok := customers[id]
+	dbMu.RUnlock()
+
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(nil)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(c)
+}
+
+
+func getCustomers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	dbMu.RLock()
+	list := toSlice(customers)
+	dbMu.RUnlock()
+
+	json.NewEncoder(w).Encode(list)
+}
+
+
+// to be implemented
  func addCustomer(w http.ResponseWriter, r *http.Request) {
 
  }
@@ -74,6 +135,8 @@ func generateCustomerId() string {
  }
 
 func main() {
+	seed()
+
 	mux := http.NewServeMux()
 
 	// Home route returns static HTML
