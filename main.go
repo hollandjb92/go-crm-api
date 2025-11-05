@@ -53,6 +53,26 @@ func generateCustomerId() string {
 	return string(out)
 }
 
+ func getCustomer(w http.ResponseWriter, r *http.Request) {
+
+ }
+
+ func getCustomers(w http.ResponseWriter, r *http.Request) {
+
+ }
+
+ func addCustomer(w http.ResponseWriter, r *http.Request) {
+
+ }
+
+ func updateCustomer(w http.ResponseWriter, r *http.Request) {
+
+ }
+
+ func deleteCustomer(w http.ResponseWriter, r *http.Request) {
+
+ }
+
 func main() {
 	mux := http.NewServeMux()
 
@@ -78,6 +98,33 @@ func main() {
 		`)
 	})
 
-	log.Println("Server started on port 3000")
+	
+	mux.HandleFunc("/customers", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCustomers(w, r)
+		case http.MethodPost:
+			addCustomer(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+	// routes with an ID
+	mux.HandleFunc("/customers/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCustomer(w, r)
+		case http.MethodPut:
+			updateCustomer(w, r)
+		case http.MethodDelete:
+			deleteCustomer(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+
+
+	log.Println("Server started on localhost port 3000")
 	log.Fatal(http.ListenAndServe(":3000", mux))
 }
