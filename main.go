@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
+
+	"github.com/google/uuid"
 )
 
 type Customer struct {
@@ -21,34 +21,22 @@ type Customer struct {
 	Contacted bool   `json:"contacted"`
 }
 
-var (
-	dbMu      sync.RWMutex
-	customers = make(map[string]Customer)
-)
 
-// generateCustomerId returns a 32-hex char id (simple, unique enough for this app).
+var customers = make(map[string]Customer)
+
 func generateCustomerId() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// fallback; use address
-		return fmt.Sprintf("%p", &b)
-	}
-
-	const hexdigits = "0123456789abcdef"
-	out := make([]byte, 32)
-	for i, by := range b {
-		out[i*2] = hexdigits[by>>4]
-		out[i*2+1] = hexdigits[by&0x0f]
-	}
-	return string(out)
+	return uuid.New().String()
 }
 
 // gets the ID in the /customers/{id} path
-func parseCustomerId(path string) string {
-	trimmed := strings.TrimSuffix(path, "/")
-	const prefix = "/customers/"
-	if strings.HasPrefix(trimmed, prefix) {
-		return trimmed[len(prefix):]
+func parseCustomerId(r *http.Request) string {
+	if v := r.PathValue("id"); v != "" {
+		return v
+	}
+	// for tests
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if rest, ok := strings.CutPrefix(path, "/customers/"); ok && rest != "" {
+		return rest
 	}
 	return ""
 }
@@ -67,11 +55,9 @@ func seed() {
 	c2 := Customer{ID: generateCustomerId(), Name: "Matthew Santiago", Role: "Support Engineer", Email: "test@example.com", Phone: 8289028, Contacted: false}
 	c3 := Customer{ID: generateCustomerId(), Name: "Abigail Spanberger", Role: "Governor", Email: "abigail@example.com", Phone: 2329752, Contacted: true}
 
-	dbMu.Lock()
 	customers[c1.ID] = c1
 	customers[c2.ID] = c2
 	customers[c3.ID] = c3
-	dbMu.Unlock()
 }
 
 func getCustomer(w http.ResponseWriter, r *http.Request) {
@@ -81,16 +67,14 @@ func getCustomer(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	id := parseCustomerId(r.URL.Path)
+	id := parseCustomerId(r)
 	if id == "" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Customer not found"})
 		return
 	}
 
-	dbMu.RLock()
 	c, ok := customers[id]
-	dbMu.RUnlock()
 
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
@@ -110,9 +94,7 @@ func getCustomers(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	dbMu.RLock()
 	list := toSlice(customers)
-	dbMu.RUnlock()
 
 	json.NewEncoder(w).Encode(list)
 }
@@ -133,8 +115,8 @@ func addCustomer(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	// Accept Customer payload without an id
-	var incomingCustomer struct {
-	  Name      string `json:"name"`
+var incomingCustomer struct {
+		Name      string `json:"name"`
 		Role      string `json:"role"`
 		Email     string `json:"email"`
 		Phone     any    `json:"phone"` // tests send a number; allow string or number
@@ -167,9 +149,7 @@ func addCustomer(w http.ResponseWriter, r *http.Request) {
 		Contacted: incomingCustomer.Contacted,
 	}
 
-	dbMu.Lock()
 	customers[c.ID] = c
-	dbMu.Unlock()
 
 	w.WriteHeader(http.StatusCreated) 
 	json.NewEncoder(w).Encode(c)
@@ -182,7 +162,7 @@ func updateCustomer(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	id := parseCustomerId(r.URL.Path)
+	id := parseCustomerId(r)
 	if id == "" {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "customer not found"})
@@ -205,10 +185,8 @@ func updateCustomer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dbMu.Lock()
 	c, ok := customers[id]
 	if !ok {
-		dbMu.Unlock()
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(nil)
 		return
@@ -217,12 +195,15 @@ func updateCustomer(w http.ResponseWriter, r *http.Request) {
 	if v, ok := patch["name"].(string); ok {
 		c.Name = v
 	}
+
 	if v, ok := patch["role"].(string); ok {
 		c.Role = v
 	}
+
 	if v, ok := patch["email"].(string); ok {
 		c.Email = v
 	}
+
 	if v, ok := patch["phone"]; ok {
 		switch pv := v.(type) {
 		case float64:
@@ -233,12 +214,12 @@ func updateCustomer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
 	if v, ok := patch["contacted"].(bool); ok {
 		c.Contacted = v
 	}
 
 	customers[id] = c
-	dbMu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(c)
@@ -249,38 +230,30 @@ func deleteCustomer(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 
-	id := parseCustomerId(r.URL.Path)
+	id := parseCustomerId(r)
 	if id == "" {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "customer not found"})
 		return
 	}
 
-	dbMu.Lock()
 	_, ok := customers[id]
 	if !ok {
-		dbMu.Unlock()
 		w.WriteHeader(http.StatusNotFound) 
 		json.NewEncoder(w).Encode(nil)
 		return
 	}
-	delete(customers, id)
-	dbMu.Unlock()
 
+	delete(customers, id)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 }
 
-func main() {
-	seed()
-
-	mux := http.NewServeMux()
-
-	// Home route returns static HTML
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+func home(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `
 			<!doctype html>
 			<html>
@@ -298,32 +271,19 @@ func main() {
 				</body>
 			</html>
 		`)
-	})
+}
 
-	mux.HandleFunc("/customers", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getCustomers(w, r)
-		case http.MethodPost:
-			addCustomer(w, r)
-		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	})
+func main() {
+	seed()
 
-	// routes with an ID
-	mux.HandleFunc("/customers/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getCustomer(w, r)
-		case http.MethodPut:
-			updateCustomer(w, r)
-		case http.MethodDelete:
-			deleteCustomer(w, r)
-		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	})
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /", home)
+	mux.HandleFunc("GET /customers", getCustomers)
+	mux.HandleFunc("POST /customers", addCustomer)
+	mux.HandleFunc("GET /customers/{id}", getCustomer)
+	mux.HandleFunc("PUT /customers/{id}", updateCustomer)
+	mux.HandleFunc("DELETE /customers/{id}", deleteCustomer)
 
 	log.Println("Server started on localhost port 3000")
 	log.Fatal(http.ListenAndServe(":3000", mux))
